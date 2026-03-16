@@ -1,0 +1,1 @@
+module.exports = { name: 'lad-monitor', version: '1.0.0', description: 'LAD Monitor Feature' };
