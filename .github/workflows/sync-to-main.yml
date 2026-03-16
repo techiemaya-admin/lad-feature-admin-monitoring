@@ -1,0 +1,269 @@
+name: Sync to LAD Main Repositories
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# ⚠️ IMPORTANT: This workflow ONLY syncs lad-monitor-specific files:
+#   ✅ Backend: /backend/features/lad-monitor/
+#   ✅ Frontend: /frontend/
+#   ❌ Blocked: /backend/core/, /backend/config/, /backend/shared/, /backend/feature_flags/
+#   ❌ Blocked: Any backend directories besides lad-monitor
+
+jobs:
+  validate-paths:
+    runs-on: ubuntu-latest
+    name: Validate lad-monitor-only sync
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 10
+      
+      - name: Check commit contains only lad-monitor files
+        run: |
+          echo "🔐 SECURITY CHECK: Validating commit paths..."
+          echo ""
+          
+          # Get changed files from last commit
+          CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD)
+          
+          echo "📋 Files in this commit:"
+          echo "$CHANGED_FILES" | sed 's/^/   /'
+          echo ""
+          
+          # Check for forbidden directories
+          FORBIDDEN_PATTERNS=(
+            '^backend/core/'
+            '^backend/config/'
+            '^backend/shared/'
+            '^backend/feature_flags/'
+            '^backend/migrations/'
+            '^backend/scripts/'
+          )
+          
+          HAS_FORBIDDEN=0
+          for pattern in "${FORBIDDEN_PATTERNS[@]}"; do
+            if echo "$CHANGED_FILES" | grep -E "$pattern" > /dev/null; then
+              echo "❌ BLOCKED: Found files in forbidden directory:"
+              echo "$CHANGED_FILES" | grep -E "$pattern" | sed 's/^/   ❌ /'
+              HAS_FORBIDDEN=1
+            fi
+          done
+          
+          if [ $HAS_FORBIDDEN -eq 1 ]; then
+            echo ""
+            echo "❌ VALIDATION FAILED"
+            echo "   Only these paths are allowed:"
+            echo "   ✅ backend/features/lad-monitor/"
+            echo "   ✅ frontend/"
+            exit 1
+          fi
+          
+          # Check that at least some lad-monitor files are committed
+          if echo "$CHANGED_FILES" | grep -E '(backend/features/lad-monitor/|frontend/)' > /dev/null; then
+            echo "✅ VALIDATION PASSED"
+            echo "   All files are from allowed lad-monitor paths"
+          else
+            echo "⚠️  WARNING: No lad-monitor files detected in commit"
+            echo "   (This might be OK if only updating docs or configs)"
+          fi
+
+  sync-backend:
+    needs: [validate-paths]
+    runs-on: ubuntu-latest
+    # Only run on main branch
+    if: github.ref == 'refs/heads/main' && success()
+    steps:
+      - name: Checkout feature repo
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Checkout LAD-Backend
+        uses: actions/checkout@v3
+        with:
+          repository: techiemaya-admin/LAD-Backend
+          token: ${{ secrets.LAD_REPO_TOKEN }}
+          path: lad-backend
+          ref: develop
+
+      - name: Copy backend files
+        run: |
+          echo "📦 Starting backend file sync..."
+          
+          # SAFETY CHECK: Verify no core, config, shared files are in the commit
+          echo "🔒 Verifying no non-lad-monitor files are included..."
+          if git diff --name-only HEAD~1 HEAD | grep -E '^backend/(core|config|shared)/' > /dev/null; then
+            echo "❌ BLOCKED: Found non-lad-monitor files in commit (core/config/shared)"
+            echo "   Only backend/features/lad-monitor/ and frontend/ should be committed"
+            git diff --name-only HEAD~1 HEAD | grep -E '^backend/(core|config|shared)/' | sed 's/^/   ❌ /'
+            exit 1
+          fi
+          
+          # Ensure destination exists
+          mkdir -p lad-backend/features/lad-monitor
+          
+          # Sync ONLY lad-monitor files
+          if ! rsync -av \
+            --filter='+ /manifest.js' \
+            --filter='+ /index.js' \
+            --filter='+ /package.json' \
+            --filter='+ *.js' \
+            --filter='+ *.json' \
+            --filter='+ *.sql' \
+            --filter='+ *.ts' \
+            --filter='+ *.tsx' \
+            --filter='+ *.md' \
+            --filter='+ *.yml' \
+            --filter='+ *.yaml' \
+            --filter='- /.*' \
+            --exclude='.env*' \
+            --exclude='*.local.js' \
+            --exclude='*.test.js' \
+            --exclude='*.test.ts' \
+            --exclude='*.spec.js' \
+            --exclude='*.spec.ts' \
+            --exclude='node_modules' \
+            --exclude='.DS_Store' \
+            --exclude='.git*' \
+            --exclude='coverage' \
+            --exclude='dist' \
+            --exclude='build' \
+            backend/features/lad-monitor/ lad-backend/features/lad-monitor/; then
+            echo "❌ rsync failed!"
+            exit 1
+          fi
+          
+          echo "✅ Backend files synced successfully"
+
+      - name: Verify critical files
+        run: |
+          echo "🔍 Verifying critical files..."
+          MISSING=0
+          
+          # Check for essential files
+          CRITICAL_FILES=(
+            "lad-backend/features/lad-monitor/manifest.js"
+            "lad-backend/features/lad-monitor/tenants/routes/index.js"
+            "lad-backend/features/lad-monitor/dashboard/routes/index.js"
+            "lad-backend/features/lad-monitor/cloud-logs/routes/index.js"
+          )
+          
+          for file in "${CRITICAL_FILES[@]}"; do
+            if [ ! -f "$file" ]; then
+              echo "❌ CRITICAL: $file is missing!"
+              MISSING=1
+            else
+              echo "✅ $file exists"
+            fi
+          done
+          
+          if [ $MISSING -eq 1 ]; then
+            echo "❌ Sync validation failed - critical files missing"
+            exit 1
+          fi
+          
+          echo "✅ All critical files verified"
+
+      - name: Commit and push to LAD-Backend
+        working-directory: lad-backend
+        run: |
+          git config user.name "GitHub Actions Bot"
+          git config user.email "actions@github.com"
+          
+          # Clean up any unstaged changes
+          echo "🧹 Cleaning working directory..."
+          git status
+          
+          if ! git diff --quiet || ! git diff --staged --quiet; then
+            echo "⚠️ Found uncommitted changes, stashing..."
+            git stash
+          fi
+          
+          echo "📥 Pulling latest changes..."
+          git pull origin develop --rebase || {
+            echo "⚠️ Rebase conflict detected"
+            git rebase --abort
+            git stash pop || true
+            exit 1
+          }
+          
+          if git stash list | grep -q .; then
+            echo "📥 Restoring stashed changes..."
+            git stash pop || true
+          fi
+          
+          # Stage changes
+          git add features/lad-monitor/
+          
+          echo "🔍 Verifying staged files..."
+          if git diff --staged --name-only | grep -v '^features/lad-monitor/' > /dev/null; then
+            echo "❌ BLOCKED: Found unexpected files in staging area!"
+            git diff --staged --name-only | grep -v '^features/lad-monitor/' | sed 's/^/   ❌ /'
+            git reset
+            exit 1
+          fi
+          
+          if git diff --staged --quiet; then
+            echo "ℹ️ No changes to commit"
+            exit 0
+          fi
+          
+          echo "📝 Changes to be committed:"
+          git diff --staged --stat
+          
+          git commit -m "feat(lad-monitor): auto-sync from feature repo" \
+            -m "Synced from: ${{ github.repository }}@${{ github.sha }}" \
+            -m "Triggered by: ${{ github.actor }}" \
+            -m "Timestamp: $(date -u +%Y-%m-%d\ %H:%M:%S\ UTC)" \
+            -m "Workflow: ${{ github.workflow }}"
+          
+          echo "📤 Pushing to LAD-Backend..."
+          for attempt in {1..3}; do
+            if git push origin develop; then
+              echo "✅ Push successful on attempt $attempt"
+              exit 0
+            fi
+            
+            echo "⚠️ Push failed, retrying ($attempt/3)..."
+            sleep 2
+            git pull origin develop --rebase || {
+              echo "❌ Rebase failed on retry"
+              git rebase --abort
+              exit 1
+            }
+          done
+          
+          echo "❌ Failed to push after 3 attempts"
+          exit 1
+
+  notify-success:
+    needs: [validate-paths, sync-backend]
+    runs-on: ubuntu-latest
+    if: success()
+    steps:
+      - name: Success notification
+        run: |
+          echo "✅ lad-monitor sync completed successfully"
+          echo ""
+          echo "🔐 Security: Path validation passed"
+          echo "📤 Backend: Synced to LAD-Backend/features/lad-monitor"
+
+  notify-failure:
+    needs: [validate-paths, sync-backend]
+    runs-on: ubuntu-latest
+    if: failure()
+    steps:
+      - name: Failure notification
+        run: |
+          echo "❌ lad-monitor sync failed"
+          echo ""
+          if [ "${{ needs.validate-paths.result }}" = "failure" ]; then
+            echo "🔐 PATH VALIDATION FAILED"
+            echo "   Reason: Non-lad-monitor files detected in commit"
+          else
+            echo "See workflow logs for sync errors"
+          fi
+          exit 1
