@@ -44,6 +44,3 @@ comprehensive_*.js
 
 # Server log files
 server_*.log
-
-# Ignore frontend folder
-frontend/

@@ -1,4 +1,4 @@
-﻿const express = require('express');
+const express = require('express');
 const cors = require('cors');
 const cookieParser = require('cookie-parser');
 const { authenticateToken } = require('./middleware/auth');
@@ -62,8 +62,9 @@ class CoreApplication {
     this.app.use('/api/tenants', authenticateToken, schemaResolver, require('../features/lad-monitor/tenants/routes/index'));
     this.app.use('/api/dashboard', authenticateToken, schemaResolver, require('../features/lad-monitor/dashboard/routes/index'));
     this.app.use('/api/cloud-logs', authenticateToken, schemaResolver, require('../features/lad-monitor/cloud-logs/routes/index'));
+    this.app.use('/api/voice-agent', authenticateToken, schemaResolver, require('../features/lad-monitor/voice-agent/routes/index'));
 
-    logger.info('[App] LAD Monitor features (tenants, dashboard, cloud-logs) successfully mounted');
+    logger.info('[App] LAD Monitor features (tenants, dashboard, cloud-logs, voice-agent) successfully mounted');
   }
 
   async start(port = 3000) {
